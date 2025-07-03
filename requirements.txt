@@ -1,4 +1,4 @@
 newspaper3k
-openai
-pillow
- 
+transformers
+Pillow
+nltk
