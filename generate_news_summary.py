@@ -1,73 +1,63 @@
-import requests
-from newspaper import Article
 import nltk
-from transformers import pipeline
+from newspaper import Article
+from transformers import pipeline, AutoTokenizer
 import sys
-import time
-import re
 
-# Download punkt tokenizer (for English)
+# Download tokenizer
 nltk.download('punkt', quiet=True)
 
+# Constants
+MODEL_NAME = "sshleifer/distilbart-cnn-12-6"
+MAX_INPUT_TOKENS = 1024
+CHUNK_TOKEN_LIMIT = 950  # Slight buffer under max
+
+# Load model and tokenizer once
+summarizer = pipeline("summarization", model=MODEL_NAME)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
 def extract_article(url, lang='en'):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-                      '(KHTML, like Gecko) Chrome/115.0 Safari/537.36'
-    }
-    article = Article(url, language=lang, request_headers=headers)
+    article = Article(url, language=lang)
     article.download()
     article.parse()
-    return article.title.strip(), article.text.strip()
+    return article.title, article.text
 
-def naive_bangla_sentence_split(text):
-    # Split by Bengali full stop (।), exclamation, question mark
-    return re.split(r'(?<=[।!?])\s+', text.strip())
-
-def translate_text(text, source="bn", target="en"):
-    url = "https://libretranslate.de/translate"
-    max_chunk = 1000
-
-    if source == "bn":
-        sentences = naive_bangla_sentence_split(text)
-    else:
-        sentences = nltk.sent_tokenize(text)
-
+def split_text_tokenwise(text):
+    sentences = nltk.sent_tokenize(text)
     chunks = []
-    chunk = ""
-    for s in sentences:
-        if len(chunk) + len(s) + 1 > max_chunk:
-            chunks.append(chunk.strip())
-            chunk = s
+    current_chunk = ""
+    current_tokens = 0
+
+    for sentence in sentences:
+        sentence_tokens = len(tokenizer.encode(sentence, add_special_tokens=False))
+        if current_tokens + sentence_tokens <= CHUNK_TOKEN_LIMIT:
+            current_chunk += " " + sentence
+            current_tokens += sentence_tokens
         else:
-            chunk += " " + s
-    if chunk:
-        chunks.append(chunk.strip())
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+            current_tokens = sentence_tokens
 
-    translated_chunks = []
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+def summarize_text(title, text):
+    chunks = split_text_tokenwise(text)
+    print(f"🔍 Total chunks: {len(chunks)}")
+
+    summaries = []
     for i, chunk in enumerate(chunks):
-        data = {
-            "q": chunk,
-            "source": source,
-            "target": target,
-            "format": "text"
-        }
+        print(f"🧠 Summarizing chunk {i+1}/{len(chunks)}")
         try:
-            response = requests.post(url, data=data, timeout=15)
-            if response.status_code == 200:
-                translated_chunks.append(response.json()["translatedText"])
-            else:
-                print(f"⚠️ Translation chunk {i+1} failed with status {response.status_code}")
-                return None
-            time.sleep(1)
+            summary = summarizer(chunk, max_length=150, min_length=40, do_sample=False)[0]['summary_text']
+            summaries.append(summary)
         except Exception as e:
-            print(f"⚠️ Translation chunk {i+1} failed: {e}")
-            return None
-    return " ".join(translated_chunks)
+            print(f"⚠️ Error summarizing chunk {i+1}: {e}")
+            continue
 
-def summarize_text(text):
-    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-    summary = summarizer(text, max_length=50, min_length=20, do_sample=False)[0]['summary_text']
-    return summary.strip()
+    combined_summary = " ".join(summaries)
+    return title.strip(), combined_summary.strip()
 
 def main():
     lang = input("Language (en/bn): ").strip().lower()
@@ -79,21 +69,14 @@ def main():
         print(f"\n📝 Article Sample:\n{full_text[:300]}...\n")
 
         if lang == "bn":
-            print("Translating Bangla article to English...")
-            translated = translate_text(full_text, source="bn", target="en")
-            if not translated:
-                print("❌ Error: Translation failed.")
-                return
-            text_to_summarize = translated
-        else:
-            text_to_summarize = full_text
+            print("⚠️ Bangla summarization not supported. Translate first.")
 
-        print("Summarizing the subtitle text...")
-        summary = summarize_text(text_to_summarize)
+        print("\nSummarizing article...")
+        title, subtitle = summarize_text(title, full_text)
 
         print("\n=== Final Photocard Content ===")
-        print(f"📌 Title (English): {title if lang == 'en' else '[Translate manually]'}")
-        print(f"📝 Subtitle (English): {summary}")
+        print(f"📌 Title (English): {title}")
+        print(f"📝 Subtitle (English): {subtitle}")
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
