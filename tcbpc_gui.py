@@ -9,12 +9,20 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from newspaper import Article
 from transformers import pipeline
 import nltk
+import sys # Added for cross-platform file opening
+import subprocess # Added for cross-platform file opening
 
-nltk.download('punkt', quiet=True)
+# Download NLTK punkt tokenizer if not already present
+try:
+    nltk.data.find('tokenizers/punkt')
+except nltk.downloader.DownloadError:
+    nltk.download('punkt', quiet=True)
 
+# === Paths and constants ===
+# Ensure these files exist in the same directory as your script
 TEMPLATE_IMAGE = "tcb-template.png"
 TCB_ICON = "tcb-icon.png"
-FONT_PATH = "TiroBangla.ttf"
+FONT_PATH = "TiroBangla.ttf" # Make sure this font file exists
 OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Pictures")
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
@@ -22,8 +30,15 @@ if not os.path.exists(OUTPUT_DIR):
 WINDOW_WIDTH = 900
 WINDOW_HEIGHT = 700
 
-summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+# Initialize summarization pipeline
+# This can take some time, so it's initialized once globally.
+try:
+    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+except Exception as e:
+    print(f"Warning: Could not load summarization model. Summarization feature may not work: {e}")
+    summarizer = None # Set to None if loading fails
 
+# === Helper functions ===
 def extract_article(url):
     article = Article(url, language='en')
     article.download()
@@ -31,6 +46,9 @@ def extract_article(url):
     return article.title.strip(), article.text.strip()
 
 def summarize_article(text):
+    if summarizer is None:
+        return "Summarization model not loaded. Cannot summarize."
+
     max_chunk = 800
     paragraphs = text.split("\n")
     chunks = []
@@ -44,13 +62,29 @@ def summarize_article(text):
     if current:
         chunks.append(current.strip())
 
-    summary = " ".join([summarizer(chunk, max_length=80, min_length=20, do_sample=False)[0]['summary_text'] for chunk in chunks])
+    summaries = []
+    for chunk in chunks:
+        if chunk.strip():
+            try:
+                # Ensure the chunk is not too long for the model
+                # Some models have token limits (e.g., 1024 for distilbart)
+                # This simple truncation prevents errors for very long chunks
+                if len(chunk) > 1000: # Heuristic, adjust based on model's actual token limit
+                    chunk = chunk[:1000]
+                summaries.append(summarizer(chunk, max_length=80, min_length=20, do_sample=False)[0]['summary_text'])
+            except Exception as e:
+                print(f"Warning: Could not summarize chunk '{chunk[:50]}...': {e}")
+                summaries.append(chunk) # Fallback to original chunk if summarization fails
+
+    summary = " ".join(summaries)
     return summary.strip()
 
 def draw_multicolor_text(draw, position, text, font, colors, max_width, max_height, line_spacing_add=0):
     words = text.split()
     lines = []
     line = ''
+    
+    # Calculate lines based on max_width
     for w in words:
         test_line = (line + ' ' + w).strip()
         bbox = draw.textbbox((0,0), test_line, font=font)
@@ -64,36 +98,48 @@ def draw_multicolor_text(draw, position, text, font, colors, max_width, max_heig
     if line:
         lines.append(line)
 
+    # Calculate line height with spacing
     line_h = font.getbbox('A')[3] - font.getbbox('A')[1] + 4 + line_spacing_add
     total_h = line_h * len(lines)
     x, y = position
-    start_y = y + max(0, (max_height - total_h)//2)
+    start_y = y + max(0, (max_height - total_h)//2) # Center vertically within max_height
 
-    color_map = [(255,255,255,255)] * len(text)
-    for start, end, col in colors:
-        for i in range(start, end):
+    # Create a flat color map for each character in the *reconstructed* text
+    # This is crucial because `text.split()` and `join()` might alter space counts
+    reconstructed_text = ' '.join(words) # Use this for character indexing
+    color_map = [(255,255,255,255)] * len(reconstructed_text) # Default white
+
+    # Apply colors from ranges to the color_map
+    merged_colors = merge_color_ranges(colors)
+    for s_idx, e_idx, col in merged_colors:
+        # Ensure indices are within bounds of the reconstructed text
+        for i in range(max(0, s_idx), min(len(reconstructed_text), e_idx)):
             if i < len(color_map):
                 color_map[i] = col
 
-    char_index_in_full_text = 0
-    for line_num, line_content in enumerate(lines):
+    char_index_in_reconstructed_text = 0
+    for line_content in lines:
         bbox = draw.textbbox((0,0), line_content, font=font)
         line_w = bbox[2] - bbox[0]
-        cur_x = x + (max_width - line_w)//2
+        cur_x = x + (max_width - line_w)//2 # Center alignment
 
         for ch in line_content:
-            if ch == ' ' and (char_index_in_full_text >= len(text) or text[char_index_in_full_text] != ' '):
-                char_w = draw.textbbox((0,0), ch, font=font)[2] - draw.textbbox((0,0), ch, font=font)[0]
-                cur_x += char_w
-                if char_index_in_full_text < len(text) and text[char_index_in_full_text] == ' ':
-                    char_index_in_full_text += 1
-                continue
+            if char_index_in_reconstructed_text < len(color_map):
+                c = color_map[char_index_in_reconstructed_text]
+            else:
+                c = (255,255,255,255) # Fallback to white if index out of bounds
 
-            c = color_map[char_index_in_full_text] if char_index_in_full_text < len(color_map) else (255,255,255,255)
             draw.text((cur_x, start_y), ch, font=font, fill=c)
             char_w = draw.textbbox((0,0), ch, font=font)[2] - draw.textbbox((0,0), ch, font=font)[0]
             cur_x += char_w
-            char_index_in_full_text += 1
+            
+            # Increment index for the next character in the reconstructed text
+            char_index_in_reconstructed_text += 1
+            # If the next character in reconstructed_text is a space, increment again
+            # to correctly map colors across word breaks. This is a heuristic.
+            if char_index_in_reconstructed_text < len(reconstructed_text) and reconstructed_text[char_index_in_reconstructed_text] == ' ':
+                char_index_in_reconstructed_text += 1
+
         start_y += line_h
 
 
@@ -101,10 +147,19 @@ def generate_photocard(title, bg_path, template_path, font_path, output_path,
                        title_pos, title_font_size, title_box, title_line_spacing, title_colors,
                        icon_pos, date_pos,
                        custom_text_content, custom_text_pos, custom_text_font_size, custom_text_box, custom_text_colors):
-    bg = Image.open(bg_path).convert("RGBA")
-    w_percent = 1080 / float(bg.size[0])
-    h_size = int((float(bg.size[1]) * float(w_percent)))
-    bg = bg.resize((1080, h_size), Image.LANCZOS)
+    try:
+        bg = Image.open(bg_path).convert("RGBA")
+        w_percent = 1080 / float(bg.size[0])
+        h_size = int((float(bg.size[1]) * float(w_percent)))
+        bg = bg.resize((1080, h_size), Image.LANCZOS)
+    except FileNotFoundError:
+        # Fallback if background image is not found (e.g., in preview mode before selection)
+        bg = Image.new("RGBA", (1080, 1280), (50, 50, 50, 255)) # Dark gray placeholder
+        print(f"Warning: Background image not found at {bg_path}. Using placeholder.")
+    except Exception as e:
+        print(f"Error loading background image {bg_path}: {e}. Using placeholder.")
+        bg = Image.new("RGBA", (1080, 1280), (50, 50, 50, 255))
+
 
     overlay = Image.open(template_path).convert("RGBA")
 
@@ -119,16 +174,32 @@ def generate_photocard(title, bg_path, template_path, font_path, output_path,
         icon = Image.open(TCB_ICON).convert("RGBA")
         canvas.paste(icon, icon_pos, icon)
 
-    date_font = ImageFont.truetype(font_path, 24)
+    # Date Text
+    try:
+        date_font = ImageFont.truetype(font_path, 24)
+    except IOError:
+        print(f"Warning: Font file not found at {font_path}. Using default Pillow font for date.")
+        date_font = ImageFont.load_default()
     date_str = datetime.datetime.now().strftime("%d %B, %Y").upper()
     draw.text(date_pos, date_str, font=date_font, fill=(255,255,255,255))
 
-    font_title = ImageFont.truetype(font_path, title_font_size)
-    draw_multicolor_text(draw, title_pos, title, font_title, title_colors, title_box[0], title_box[1], line_spacing_add=title_line_spacing)
+    # Draw Title Text
+    if title.strip():
+        try:
+            font_title = ImageFont.truetype(font_path, title_font_size)
+        except IOError:
+            print(f"Warning: Font file not found at {font_path}. Using default Pillow font for title.")
+            font_title = ImageFont.load_default()
+        draw_multicolor_text(draw, title_pos, title, font_title, title_colors, title_box[0], title_box[1], line_spacing_add=title_line_spacing)
 
+    # Draw Custom Text
     if custom_text_content.strip():
-        font_custom = ImageFont.truetype(font_path, custom_text_font_size)
-        draw_multicolor_text(draw, custom_text_pos, custom_text_content, font_custom, custom_text_colors, custom_text_box[0], custom_text_box[1], line_spacing_add=0) # No line spacing for custom text yet
+        try:
+            font_custom = ImageFont.truetype(font_path, custom_text_font_size)
+        except IOError:
+            print(f"Warning: Font file not found at {font_path}. Using default Pillow font for custom text.")
+            font_custom = ImageFont.load_default()
+        draw_multicolor_text(draw, custom_text_pos, custom_text_content, font_custom, custom_text_colors, custom_text_box[0], custom_text_box[1], line_spacing_add=0)
 
     final_img = canvas.crop((0, 0, 1080, 1280))
     final_img.save(output_path)
@@ -137,30 +208,48 @@ def generate_photocard(title, bg_path, template_path, font_path, output_path,
 def merge_color_ranges(ranges):
     if not ranges:
         return []
+    
+    # Sort by start index
     ranges.sort(key=lambda x: x[0])
-    merged = [ranges[0]]
-    for cur in ranges[1:]:
-        last = merged[-1]
-        if cur[0] <= last[1]:
-            if cur[2] == last[2]:
-                merged[-1] = (last[0], max(last[1], cur[1]), last[2])
-            else:
-                merged.append(cur)
+    
+    if not ranges:
+        return []
+
+    merged = []
+    current_range = list(ranges[0]) # Convert to list to make it mutable
+
+    for i in range(1, len(ranges)):
+        next_start, next_end, next_color = ranges[i]
+        
+        # Check for overlap or adjacency with the same color
+        if next_start <= current_range[1] and next_color == current_range[2]:
+            current_range[1] = max(current_range[1], next_end)
         else:
-            merged.append(cur)
-   
+            # No overlap with same color, or different color, so add current and start new
+            merged.append(tuple(current_range))
+            current_range = list(ranges[i])
+            
+    merged.append(tuple(current_range)) # Add the last range
+
+    # One more pass to merge truly adjacent ranges of the same color that might have been split
+    # due to intermediate different-colored ranges.
     final_merged = []
     if merged:
-        merged.sort(key=lambda x: x[0])
         final_merged.append(merged[0])
-        for cur in merged[1:]:
-            last = final_merged[-1]
-            if cur[0] <= last[1] and cur[2] == last[2]:
-                final_merged[-1] = (last[0], max(last[1], cur[1]), last[2])
+        for i in range(1, len(merged)):
+            prev_start, prev_end, prev_color = final_merged[-1]
+            curr_start, curr_end, curr_color = merged[i]
+            
+            # If current range starts exactly where previous ended AND colors are the same
+            if curr_start == prev_end and curr_color == prev_color:
+                final_merged[-1] = (prev_start, curr_end, prev_color) # Extend previous
             else:
-                final_merged.append(cur)
+                final_merged.append(merged[i]) # Add as new range
+
     return final_merged
 
+
+# === The Wizard GUI App ===
 class TCBWizardApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -169,6 +258,35 @@ class TCBWizardApp(tk.Tk):
         self.resizable(True, True)
         self.state('zoomed')
 
+        # --- Apply Dark Theme ---
+        style = ttk.Style()
+        style.theme_use('clam') # 'clam' is a good base for dark themes
+
+        # Configure colors for various ttk widgets
+        style.configure('.', background='#2E2E2E', foreground='#FFFFFF', borderwidth=0)
+        style.configure('TFrame', background='#2E2E2E')
+        style.configure('TLabel', background='#2E2E2E', foreground='#FFFFFF')
+        style.configure('TButton', background='#4F4F4F', foreground='#FFFFFF', borderwidth=1, relief="raised")
+        style.map('TButton', background=[('active', '#6E6E6E')])
+        style.configure('TEntry', fieldbackground='#4F4F4F', foreground='#FFFFFF', borderwidth=1)
+        style.configure('TScrolledText', background='#4F4F4F', foreground='#FFFFFF', insertbackground='#FFFFFF') # Custom for ScrolledText
+        style.configure('TProgressbar', background='#007ACC', troughcolor='#4F4F4F')
+        style.configure('Horizontal.TScale', background='#2E2E2E', troughcolor='#4F4F4F', sliderrelief='flat')
+        style.configure('TLabelFrame', background='#2E2E2E', foreground='#FFFFFF', borderwidth=1)
+        style.configure('TLabelframe.Label', background='#2E2E2E', foreground='#FFFFFF') # For the label inside Labelframe
+
+        # For tk.Text, tk.Canvas, and tk.Label which don't directly use ttk styles
+        self.option_add('*tearOff', False) # For consistent menu behavior
+        self.option_add('*Text.background', '#4F4F4F')
+        self.option_add('*Text.foreground', '#FFFFFF')
+        self.option_add('*Text.insertBackground', '#FFFFFF')
+        self.option_add('*Canvas.background', '#2E2E2E')
+        self.option_add('*Label.background', '#2E2E2E')
+        self.option_add('*Label.foreground', '#FFFFFF')
+        self.option_add('*Button.background', '#4F4F4F')
+        self.option_add('*Button.foreground', '#FFFFFF')
+
+
         self.news_url = tk.StringVar()
         self.bg_image_path = None
 
@@ -176,20 +294,24 @@ class TCBWizardApp(tk.Tk):
         self.summary_text = ""
         self.full_text = ""
 
+        # Title text parameters
         self.title_x = tk.IntVar(value=150)
         self.title_y = tk.IntVar(value=880)
         self.title_font_size = tk.IntVar(value=36)
         self.title_max_w = tk.IntVar(value=700)
         self.title_max_h = tk.IntVar(value=200)
         self.title_line_spacing = tk.IntVar(value=4)
-        self.title_colors = [(0, 10000, (255,255,255,255))]
+        self.title_colors = [(0, 10000, (255,255,255,255))] # Default white for full text length
 
+        # TCB Icon parameters
         self.icon_x = tk.IntVar(value=800)
         self.icon_y = tk.IntVar(value=20)
 
+        # Date parameters
         self.date_x = tk.IntVar(value=800)
         self.date_y = tk.IntVar(value=1240)
 
+        # Custom text parameters
         self.custom_text = tk.StringVar(value="Add your custom message here!")
         self.custom_text_x = tk.IntVar(value=150)
         self.custom_text_y = tk.IntVar(value=500)
@@ -201,8 +323,13 @@ class TCBWizardApp(tk.Tk):
         self.final_image_path = None
 
         self.frames = {}
+        # Create a container frame to hold all step frames, allowing easy switching
+        self.container = ttk.Frame(self)
+        self.container.pack(side="top", fill="both", expand=True)
+
         for FrameClass in (Step1Frame, Step2Frame, Step3Frame, Step4Frame):
-            frame = FrameClass(self)
+            # Pass self.container as master, and self (app) as parent_app
+            frame = FrameClass(self.container, self) 
             self.frames[FrameClass] = frame
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
 
@@ -216,8 +343,10 @@ class TCBWizardApp(tk.Tk):
         path = filedialog.askopenfilename(title="Select Background Image", filetypes=[("Image files", "*.png;*.jpg;*.jpeg")])
         if path:
             self.bg_image_path = path
-            self.frames[Step1Frame].bg_label.config(text=os.path.basename(path))
-            self.frames[Step1Frame].check_ready()
+            # Call check_ready on the Step1Frame instance
+            if Step1Frame in self.frames:
+                self.frames[Step1Frame].bg_label.config(text=os.path.basename(path))
+                self.frames[Step1Frame].check_ready() # Ensure check_ready is called
 
     def start_generation(self):
         if not self.news_url.get():
@@ -232,191 +361,263 @@ class TCBWizardApp(tk.Tk):
 
     def update_title_colors(self, new_colors):
         self.title_colors = new_colors
-        self.frames[Step3Frame].update_preview()
+        if Step3Frame in self.frames:
+            self.frames[Step3Frame].update_preview()
 
     def update_custom_text_colors(self, new_colors):
         self.custom_text_colors = new_colors
-        self.frames[Step3Frame].update_preview()
+        if Step3Frame in self.frames:
+            self.frames[Step3Frame].update_preview()
 
-class Step1Frame(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
+# === Base Frame Class - Removed and integrated relevant parts directly ===
+# Each frame now inherits directly from ttk.Frame
 
-        tk.Label(self, text="Enter News URL:", font=("Arial", 14)).pack(pady=10)
-        self.url_entry = tk.Entry(self, textvariable=parent.news_url, font=("Arial", 12), width=70)
+# === Step 1 ===
+class Step1Frame(ttk.Frame): # Changed to ttk.Frame
+    def __init__(self, master_frame, parent_app):
+        super().__init__(master_frame) # master_frame is now the container
+        self.parent = parent_app # Keep parent for easier access to app variables
+
+        # Main frame to contain all widgets for better layout management
+        main_frame = ttk.Frame(self, padding="20")
+        main_frame.pack(fill="both", expand=True)
+
+        url_label = ttk.Label(main_frame, text="Enter News Article URL:")
+        url_label.pack(pady=(50, 5))
+
+        self.url_entry = ttk.Entry(main_frame, textvariable=parent_app.news_url, width=80)
         self.url_entry.pack(pady=5)
+        # Trace for news_url to enable/disable button
+        self.parent.news_url.trace_add("write", self.check_ready)
 
-        self.bg_btn = tk.Button(self, text="Choose Photo Related to News", command=parent.choose_image)
-        self.bg_btn.pack(pady=5)
 
-        self.bg_label = tk.Label(self, text="No image selected")
-        self.bg_label.pack(pady=5)
+        bg_label_frame = ttk.LabelFrame(main_frame, text="Background Image")
+        bg_label_frame.pack(pady=20, padx=20, fill="x")
 
-        self.gen_btn = tk.Button(self, text="Generate Photocard", state="disabled", command=parent.start_generation)
-        self.gen_btn.pack(pady=15)
+        self.bg_label = ttk.Label(bg_label_frame, text="No image selected")
+        self.bg_label.pack(side="left", padx=10, pady=10)
 
-        def check_ready(*args):
-            if parent.news_url.get() and parent.bg_image_path:
-                self.gen_btn.config(state="normal")
-            else:
-                self.gen_btn.config(state="disabled")
+        bg_button = ttk.Button(bg_label_frame, text="Browse", command=parent_app.choose_image)
+        bg_button.pack(side="right", padx=10, pady=10)
 
-        parent.news_url.trace_add('write', check_ready)
-        self.check_ready = check_ready
+        self.start_button = ttk.Button(main_frame, text="Start Processing", command=parent_app.start_generation, state=tk.DISABLED)
+        self.start_button.pack(pady=30)
 
-class Step2Frame(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
+        # Initial call to set button state
+        self.check_ready()
 
-        tk.Label(self, text="Processing...", font=("Arial", 16)).pack(pady=10)
-        self.log_box = ScrolledText(self, height=20, width=100, state="disabled", font=("Courier", 10))
-        self.log_box.pack(padx=10, pady=5)
+    def check_ready(self, *args):
+        """Checks if both URL and BG image are provided and enables/disables the start button."""
+        if self.parent.news_url.get() and self.parent.bg_image_path:
+            self.start_button.config(state=tk.NORMAL)
+        else:
+            self.start_button.config(state=tk.DISABLED)
 
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(self, variable=self.progress_var, maximum=100, length=600)
-        self.progress_bar.pack(pady=5)
+# === Step 2 ===
+class Step2Frame(ttk.Frame): # Changed to ttk.Frame
+    def __init__(self, master_frame, parent_app):
+        super().__init__(master_frame) # master_frame is now the container
+        self.parent = parent_app
+
+        label = ttk.Label(self, text="Extracting and Summarizing News...")
+        label.pack(pady=20)
+
+        self.progress = ttk.Progressbar(self, orient="horizontal", length=300, mode="determinate")
+        self.progress.pack(pady=10)
+
+        self.status_label = ttk.Label(self, text="Starting...")
+        self.status_label.pack(pady=5)
+
+        # ScrolledText needs explicit dark background/foreground if not inheriting from ttk.Style
+        self.summary_text_widget = ScrolledText(self, wrap=tk.WORD, height=10, bg='#4F4F4F', fg='#FFFFFF', insertbackground='#FFFFFF')
+        self.summary_text_widget.pack(expand=True, fill="both", padx=20, pady=10)
+        self.summary_text_widget.config(state=tk.DISABLED)
+
+        self.continue_button = ttk.Button(self, text="Continue to Step 3", command=lambda: self.parent.show_frame(Step3Frame), state=tk.DISABLED)
+        self.continue_button.pack(pady=20)
 
     def log(self, msg):
-        self.log_box.config(state="normal")
-        self.log_box.insert(tk.END, msg + "\n")
-        self.log_box.see(tk.END)
-        self.log_box.config(state="disabled")
+        self.summary_text_widget.config(state=tk.NORMAL)
+        self.summary_text_widget.insert(tk.END, msg + "\n")
+        self.summary_text_widget.see(tk.END)
+        self.summary_text_widget.config(state=tk.DISABLED)
+        self.update_idletasks() # Ensure GUI updates immediately
 
-    def start_process(self, url, bg_image_path, app):
-        def task():
-            try:
-                self.log("Extracting article from URL...")
-                title, full_text = extract_article(url)
-                self.progress_var.set(20)
-                self.log(f"Title extracted: {title}")
+    def start_process(self, url, bg_path, app_instance):
+        self.progress['value'] = 0
+        self.status_label.config(text="Extracting article...")
+        self.continue_button.config(state=tk.DISABLED)
+        self.summary_text_widget.config(state=tk.NORMAL)
+        self.summary_text_widget.delete(1.0, tk.END)
+        self.summary_text_widget.config(state=tk.DISABLED)
 
-                self.log("Summarizing article...")
-                summary = summarize_article(full_text)
-                self.progress_var.set(60)
-                self.log("Summary generated.")
+        threading.Thread(target=self._process_article, args=(url, bg_path, app_instance), daemon=True).start()
 
-                app.title_text = title
-                app.summary_text = summary
-                app.full_text = full_text
+    def _process_article(self, url, bg_path, app_instance):
+        try:
+            self.after(100, lambda: self.status_label.config(text="Extracting article..."))
+            self.after(100, lambda: self.progress.config(value=25))
+            title, text = extract_article(url)
+            self.parent.title_text = title
+            self.parent.full_text = text
 
-                self.progress_var.set(80)
-                self.log("Preparing photocard preview...")
-                self.progress_var.set(100)
-                self.log("Done!")
+            self.after(100, lambda: self.status_label.config(text="Summarizing article..."))
+            self.after(100, lambda: self.progress.config(value=75))
+            summary = summarize_article(text)
+            self.parent.summary_text = summary
 
-                app.show_frame(Step3Frame)
-                app.frames[Step3Frame].load_preview()
-            except Exception as e:
-                self.log(f"Error: {e}")
-                messagebox.showerror("Error", f"Processing failed: {e}")
-                app.show_frame(Step1Frame)
+            self.after(100, lambda: self.summary_text_widget.config(state=tk.NORMAL))
+            self.after(100, lambda: self.summary_text_widget.delete(1.0, tk.END))
+            self.after(100, lambda: self.summary_text_widget.insert(tk.END, f"Title: {title}\n\nSummary:\n{summary}"))
+            self.after(100, lambda: self.summary_text_widget.config(state=tk.DISABLED))
 
-        threading.Thread(target=task, daemon=True).start()
+            self.after(100, lambda: self.progress.config(value=100))
+            self.after(100, lambda: self.status_label.config(text="Processing complete!"))
+            # Make sure Step3Frame is initialized before trying to load its preview
+            self.after(100, lambda: self.parent.frames[Step3Frame].load_preview())
+            self.after(100, lambda: self.continue_button.config(state=tk.NORMAL))
 
-class Step3Frame(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
+        except Exception as e:
+            self.after(100, lambda: messagebox.showerror("Processing Error", f"Failed to process article: {e}"))
+            self.after(100, lambda: self.status_label.config(text="Error occurred."))
+            self.after(100, lambda: self.progress.config(value=0))
+            self.after(100, lambda: self.continue_button.config(state=tk.DISABLED))
 
-        self.canvas = tk.Canvas(self, width=540, height=640, bg="black")
-        self.canvas.pack(side="left", padx=10, pady=10)
+    def copy_summary(self):
+        self.parent.clipboard_clear()
+        self.parent.clipboard_append(self.summary_text_widget.get("1.0", "end-1c"))
+        messagebox.showinfo("Copied", "Summary copied to clipboard.")
 
-        control_frame = ttk.Frame(self)
-        control_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+    def copy_full(self):
+        self.parent.clipboard_clear()
+        self.parent.clipboard_append(self.parent.full_text) # Access full_text from parent app
+        messagebox.showinfo("Copied", "Full article copied to clipboard.")
 
-        self.canvas_controls = tk.Canvas(control_frame)
-        self.scrollbar_controls = ttk.Scrollbar(control_frame, orient="vertical", command=self.canvas_controls.yview)
+# === Step 3 ===
+class Step3Frame(ttk.Frame): # Changed to ttk.Frame
+    def __init__(self, master_frame, parent_app):
+        super().__init__(master_frame) # master_frame is now the container
+        self.parent = parent_app
+        self.current_preview_image = None
+        
+        self.canvas = tk.Canvas(self, bg="#2E2E2E") # Explicit dark background for tk.Canvas
+        self.canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+        control_panel = ttk.Frame(self, padding="10")
+        control_panel.pack(side="right", fill="y")
+
+        # Use a scrolled frame for many controls
+        self.canvas_controls = tk.Canvas(control_panel, bg='#2E2E2E') # Explicit dark background
+        self.scrollbar_controls = ttk.Scrollbar(control_panel, orient="vertical", command=self.canvas_controls.yview)
+        
         self.scrollable_frame = ttk.Frame(self.canvas_controls)
-
         self.scrollable_frame.bind(
             "<Configure>",
             lambda e: self.canvas_controls.configure(
                 scrollregion=self.canvas_controls.bbox("all")
             )
         )
+
         self.canvas_controls.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas_controls.configure(yscrollcommand=self.scrollbar_controls.set)
 
         self.canvas_controls.pack(side="left", fill="both", expand=True)
         self.scrollbar_controls.pack(side="right", fill="y")
 
-        ttk.Label(self.scrollable_frame, text="--- Title Text Settings ---", font=("Arial", 12, "bold")).pack(pady=(10,5))
-        ttk.Label(self.scrollable_frame, text="Title X:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1080, orient="horizontal", variable=parent.title_x, command=lambda e:self.update_preview()).pack(fill="x")
-        ttk.Label(self.scrollable_frame, text="Title Y:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1280, orient="horizontal", variable=parent.title_y, command=lambda e:self.update_preview()).pack(fill="x")
+        # --- Title Controls ---
+        title_controls_frame = ttk.LabelFrame(self.scrollable_frame, text="Title Text Settings")
+        title_controls_frame.pack(pady=10, fill="x", padx=5)
 
-        ttk.Label(self.scrollable_frame, text="Title Font Size:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=10, to=80, orient="horizontal", variable=parent.title_font_size, command=lambda e:self.update_preview()).pack(fill="x")
+        self._create_slider(title_controls_frame, "X Pos:", self.parent.title_x, 0, 1080)
+        self._create_slider(title_controls_frame, "Y Pos:", self.parent.title_y, 0, 1280)
+        self._create_slider(title_controls_frame, "Font Size:", self.parent.title_font_size, 10, 100)
+        self._create_slider(title_controls_frame, "Max Width:", self.parent.title_max_w, 100, 1000)
+        self._create_slider(title_controls_frame, "Max Height:", self.parent.title_max_h, 50, 500)
+        self._create_slider(title_controls_frame, "Line Spacing:", self.parent.title_line_spacing, 0, 20)
 
-        ttk.Label(self.scrollable_frame, text="Title Max Width:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=200, to=900, orient="horizontal", variable=parent.title_max_w, command=lambda e:self.update_preview()).pack(fill="x")
+        title_color_button = ttk.Button(title_controls_frame, text="Set Title Colors", command=self.open_color_picker_title)
+        title_color_button.pack(pady=5)
 
-        ttk.Label(self.scrollable_frame, text="Title Max Height:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=50, to=600, orient="horizontal", variable=parent.title_max_h, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Title Line Spacing (px):").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=-10, to=30, orient="horizontal", variable=parent.title_line_spacing, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Edit Title Text (select portion and pick color):", font=("Arial", 10, "bold")).pack(pady=(10,0), anchor="w")
-        self.title_text_widget = tk.Text(self.scrollable_frame, height=4, width=40, wrap="word", font=("TiroBangla", 14))
-        self.title_text_widget.pack(fill="x", padx=5)
-
-        title_color_btn = ttk.Button(self.scrollable_frame, text="Pick Color for Title Selection", command=self.pick_color_for_title_selection)
-        title_color_btn.pack(pady=5)
-
-        ttk.Label(self.scrollable_frame, text="--- Custom Text Settings ---", font=("Arial", 12, "bold")).pack(pady=(20,5))
-        ttk.Label(self.scrollable_frame, text="Custom Text:").pack(anchor="w")
-        self.custom_text_widget = tk.Text(self.scrollable_frame, height=4, width=40, wrap="word", font=("TiroBangla", 14))
-        self.custom_text_widget.pack(fill="x", padx=5)
-        self.custom_text_widget.insert(tk.END, parent.custom_text.get()) # Set initial value
-
-        ttk.Label(self.scrollable_frame, text="Custom Text X:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1080, orient="horizontal", variable=parent.custom_text_x, command=lambda e:self.update_preview()).pack(fill="x")
-        ttk.Label(self.scrollable_frame, text="Custom Text Y:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1280, orient="horizontal", variable=parent.custom_text_y, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Custom Text Font Size:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=10, to=60, orient="horizontal", variable=parent.custom_text_font_size, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Custom Text Max Width:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=100, to=900, orient="horizontal", variable=parent.custom_text_max_w, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Custom Text Max Height:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=30, to=400, orient="horizontal", variable=parent.custom_text_max_h, command=lambda e:self.update_preview()).pack(fill="x")
-
-        custom_color_btn = ttk.Button(self.scrollable_frame, text="Pick Color for Custom Text Selection", command=self.pick_color_for_custom_selection)
-        custom_color_btn.pack(pady=5)
-
-        ttk.Label(self.scrollable_frame, text="--- Icon & Date Settings ---", font=("Arial", 12, "bold")).pack(pady=(20,5))
-        ttk.Label(self.scrollable_frame, text="TCB Icon X:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1080, orient="horizontal", variable=parent.icon_x, command=lambda e:self.update_preview()).pack(fill="x")
-        ttk.Label(self.scrollable_frame, text="TCB Icon Y:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1280, orient="horizontal", variable=parent.icon_y, command=lambda e:self.update_preview()).pack(fill="x")
-
-        ttk.Label(self.scrollable_frame, text="Date X:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1080, orient="horizontal", variable=parent.date_x, command=lambda e:self.update_preview()).pack(fill="x")
-        ttk.Label(self.scrollable_frame, text="Date Y:").pack(anchor="w")
-        ttk.Scale(self.scrollable_frame, from_=0, to=1280, orient="horizontal", variable=parent.date_y, command=lambda e:self.update_preview()).pack(fill="x")
-
-        self.finalize_btn = ttk.Button(self, text="Finalize & Prepare summarized and full article", command=self.finalize)
-        self.finalize_btn.pack(pady=10)
+        # tk.Text needs explicit dark background/foreground
+        self.title_text_widget = tk.Text(title_controls_frame, height=4, width=30, wrap="word", font=("TiroBangla", 14),
+                                         bg='#4F4F4F', fg='#FFFFFF', insertbackground='#FFFFFF')
+        self.title_text_widget.pack(fill="x", padx=5, pady=5)
+        self.title_text_widget.bind("<KeyRelease>", self.on_title_text_change)
+        # Force initial update for preview if title_text has initial value from URL
         self.title_text_widget.bind("<<Modified>>", self.on_title_text_change)
+
+
+        # --- Custom Text Controls ---
+        custom_text_controls_frame = ttk.LabelFrame(self.scrollable_frame, text="Custom Text Settings")
+        custom_text_controls_frame.pack(pady=10, fill="x", padx=5)
+
+        custom_text_entry_label = ttk.Label(custom_text_controls_frame, text="Custom Text:")
+        custom_text_entry_label.pack(pady=2)
+
+        # tk.Text needs explicit dark background/foreground
+        self.custom_text_widget = tk.Text(custom_text_controls_frame, height=3, width=30, wrap="word", font=("TiroBangla", 14),
+                                          bg='#4F4F4F', fg='#FFFFFF', insertbackground='#FFFFFF')
+        self.custom_text_widget.insert(tk.END, self.parent.custom_text.get())
+        self.custom_text_widget.pack(pady=2, fill="x", padx=5)
+        self.custom_text_widget.bind("<KeyRelease>", self.on_custom_text_change)
         self.custom_text_widget.bind("<<Modified>>", self.on_custom_text_change)
 
-        self.preview_img = None
-        self.tk_preview_img = None
+
+        self._create_slider(custom_text_controls_frame, "X Pos:", self.parent.custom_text_x, 0, 1080)
+        self._create_slider(custom_text_controls_frame, "Y Pos:", self.parent.custom_text_y, 0, 1280)
+        self._create_slider(custom_text_controls_frame, "Font Size:", self.parent.custom_text_font_size, 10, 100)
+        self._create_slider(custom_text_controls_frame, "Max Width:", self.parent.custom_text_max_w, 100, 1000)
+        self._create_slider(custom_text_controls_frame, "Max Height:", self.parent.custom_text_max_h, 50, 500)
+
+        custom_text_color_button = ttk.Button(custom_text_controls_frame, text="Set Custom Text Colors", command=self.open_color_picker_custom_text)
+        custom_text_color_button.pack(pady=5)
+
+        # --- Icon & Date Controls ---
+        icon_date_controls_frame = ttk.LabelFrame(self.scrollable_frame, text="Icon & Date Settings")
+        icon_date_controls_frame.pack(pady=10, fill="x", padx=5)
+
+        self._create_slider(icon_date_controls_frame, "TCB Icon X:", self.parent.icon_x, 0, 1080)
+        self._create_slider(icon_date_controls_frame, "TCB Icon Y:", self.parent.icon_y, 0, 1280)
+        self._create_slider(icon_date_controls_frame, "Date X:", self.parent.date_x, 0, 1080)
+        self._create_slider(icon_date_controls_frame, "Date Y:", self.parent.date_y, 0, 1280)
+
+        # Finalize Button (placed outside scrollable frame for visibility)
+        self.finalize_btn = ttk.Button(self, text="Finalize & Prepare summarized and full article", command=self.finalize)
+        self.finalize_btn.pack(pady=10)
+
+        self.update_preview() # Initial preview update
+
+    def _create_slider(self, parent_frame, label_text, var, from_, to_):
+        # This helper now automatically binds to update_preview
+        frame = ttk.Frame(parent_frame)
+        frame.pack(fill="x", pady=2)
+
+        label = ttk.Label(frame, text=label_text)
+        label.pack(side="left", padx=5)
+
+        slider = ttk.Scale(frame, from_=from_, to_=to_, orient="horizontal", variable=var, command=lambda v: self.update_preview())
+        slider.pack(side="left", expand=True, fill="x", padx=5)
+
+        value_label = ttk.Label(frame, textvariable=var)
+        value_label.pack(side="right", padx=5)
 
     def on_title_text_change(self, event=None):
+        # Update parent's title_text from widget, then trigger preview update
+        current_text = self.title_text_widget.get("1.0", "end-1c")
+        if self.parent.title_text != current_text: # Only update if text has actually changed
+            self.parent.title_text = current_text
+            self.update_preview()
         self.title_text_widget.edit_modified(False)
-        self.parent.title_text = self.title_text_widget.get("1.0", "end-1c")
-        self.update_preview()
+
 
     def on_custom_text_change(self, event=None):
+        # Update parent's custom_text from widget, then trigger preview update
+        current_text = self.custom_text_widget.get("1.0", "end-1c")
+        if self.parent.custom_text.get() != current_text: # Only update if text has actually changed
+            self.parent.custom_text.set(current_text)
+            self.update_preview()
         self.custom_text_widget.edit_modified(False)
-        self.parent.custom_text.set(self.custom_text_widget.get("1.0", "end-1c"))
-        self.update_preview()
+
 
     def clear_text_widget_tags(self, text_widget):
         for tag in text_widget.tag_names():
@@ -425,6 +626,7 @@ class Step3Frame(tk.Frame):
 
     def apply_colors_to_text_widget(self, text_widget, color_list):
         self.clear_text_widget_tags(text_widget)
+        # Apply specific colors from color_list
         for i, (start, end, color) in enumerate(color_list):
             tag_name = f"color{i}"
             r,g,b,a = color
@@ -435,12 +637,7 @@ class Step3Frame(tk.Frame):
                 text_widget.tag_add(tag_name, start_idx, end_idx)
                 text_widget.tag_config(tag_name, foreground=hex_color)
             except tk.TclError:
-                pass
-
-    def pick_color_for_title_selection(self):
-        self._pick_color_for_selection(self.title_text_widget, self.parent.title_colors, self.parent.update_title_colors)
-    def pick_color_for_custom_selection(self):
-        self._pick_color_for_selection(self.custom_text_widget, self.parent.custom_text_colors, self.parent.update_custom_text_colors)
+                pass # Index might be out of bounds if text changed, ignore
 
     def _pick_color_for_selection(self, text_widget, current_colors, update_callback):
         try:
@@ -450,40 +647,72 @@ class Step3Frame(tk.Frame):
             messagebox.showinfo("No Selection", "Please select a portion of the text to color.")
             return
 
-        color_code = colorchooser.askcolor(title="Choose color for selected text")
-        if not color_code or not color_code[0]:
-            return
-        rgb = tuple(int(x) for x in color_code[0]) + (255,)
-
+        # Get the current text content to ensure indices are correct
+        current_text_content = text_widget.get("1.0", "end-1c")
         start_char_idx = int(start_idx_str.split('.')[1])
         end_char_idx = int(end_idx_str.split('.')[1])
 
+        # Adjust end_char_idx if selection goes to end of line including newline
+        if end_char_idx > len(current_text_content):
+            end_char_idx = len(current_text_content)
+
+        # Get initial color from the first range, or default to white
+        initial_color_rgb = (255, 255, 255)
+        if current_colors:
+            # Find a color that covers the start of the selection, if any
+            for s, e, c in current_colors:
+                if s <= start_char_idx < e:
+                    initial_color_rgb = (c[0], c[1], c[2])
+                    break
+            
+        color_code = colorchooser.askcolor(initialcolor=initial_color_rgb, title="Choose color for selected text")[1]
+        if not color_code: # User cancelled color picker
+            return
+        
+        # Convert hex color to RGBA tuple (0-255)
+        rgb_int = self.winfo_rgb(color_code) # Returns (R, G, B) as 16-bit ints (0-65535)
+        rgba = (rgb_int[0]//256, rgb_int[1]//256, rgb_int[2]//256, 255)
+
         new_colors_temp = []
+        # Process existing ranges: split or keep based on overlap with new selection
         for s,e,c in current_colors:
+            # Case 1: Existing range is completely outside the new selection
             if e <= start_char_idx or s >= end_char_idx:
                 new_colors_temp.append((s,e,c))
-            elif s >= start_char_idx and e <= end_char_idx:
-                pass
+            # Case 2: Existing range partially overlaps on the left
             elif s < start_char_idx < e:
                 new_colors_temp.append((s, start_char_idx, c))
-                if e > end_char_idx: # Also partial overlap on right
+                if e > end_char_idx: # Also partially overlaps on the right
                     new_colors_temp.append((end_char_idx, e, c))
+            # Case 3: Existing range partially overlaps on the right (but not left)
             elif s < end_char_idx < e:
                 new_colors_temp.append((end_char_idx, e, c))
-            else:
-                pass
-        new_colors_temp.append((start_char_idx, end_char_idx, rgb))
+            # Case 4: New selection completely covers or is covered by existing range (handled by splits)
+            # No action needed here, as the new color will be added below.
+
+        # Add the new color range
+        new_colors_temp.append((start_char_idx, end_char_idx, rgba))
+
+        # Merge the temporary ranges to simplify and combine adjacent same-colored segments
         final_colors = merge_color_ranges(new_colors_temp)
-        update_callback(final_colors)
+        update_callback(final_colors) # Update the parent's color list
 
         self.apply_colors_to_text_widget(text_widget, final_colors)
         self.update_preview()
 
+    def open_color_picker_title(self):
+        self._pick_color_for_selection(self.title_text_widget, self.parent.title_colors, self.parent.update_title_colors)
+
+    def open_color_picker_custom_text(self):
+        self._pick_color_for_selection(self.custom_text_widget, self.parent.custom_text_colors, self.parent.update_custom_text_colors)
 
     def load_preview(self):
+        # Load title text and colors
         self.title_text_widget.delete("1.0", tk.END)
         self.title_text_widget.insert(tk.END, self.parent.title_text)
         self.apply_colors_to_text_widget(self.title_text_widget, self.parent.title_colors)
+
+        # Load custom text and colors
         self.custom_text_widget.delete("1.0", tk.END)
         self.custom_text_widget.insert(tk.END, self.parent.custom_text.get())
         self.apply_colors_to_text_widget(self.custom_text_widget, self.parent.custom_text_colors)
@@ -492,33 +721,51 @@ class Step3Frame(tk.Frame):
 
     def update_preview(self):
         try:
-            path, img = generate_photocard(
+            temp_output_path = os.path.join(OUTPUT_DIR, "preview_temp.png")
+            # Use a default image if no background is selected yet for preview
+            bg_path_for_preview = self.parent.bg_image_path if self.parent.bg_image_path else TEMPLATE_IMAGE
+
+            _, img_pil = generate_photocard(
                 self.parent.title_text,
-                self.parent.bg_image_path,
+                bg_path_for_preview,
                 TEMPLATE_IMAGE,
                 FONT_PATH,
-                output_path=os.path.join(OUTPUT_DIR, "preview.png"),
-                title_pos=(self.parent.title_x.get(), self.parent.title_y.get()),
-                title_font_size=self.parent.title_font_size.get(),
-                title_box=(self.parent.title_max_w.get(), self.parent.title_max_h.get()),
-                title_line_spacing=self.parent.title_line_spacing.get(),
-                title_colors=self.parent.title_colors,
-                icon_pos=(self.parent.icon_x.get(), self.parent.icon_y.get()),
-                date_pos=(self.parent.date_x.get(), self.parent.date_y.get()),
-                custom_text_content=self.parent.custom_text.get(),
-                custom_text_pos=(self.parent.custom_text_x.get(), self.parent.custom_text_y.get()),
-                custom_text_font_size=self.parent.custom_text_font_size.get(),
-                custom_text_box=(self.parent.custom_text_max_w.get(), self.parent.custom_text_max_h.get()),
-                custom_text_colors=self.parent.custom_text_colors
+                temp_output_path,
+                (self.parent.title_x.get(), self.parent.title_y.get()),
+                self.parent.title_font_size.get(),
+                (self.parent.title_max_w.get(), self.parent.title_max_h.get()),
+                self.parent.title_line_spacing.get(),
+                self.parent.title_colors,
+                (self.parent.icon_x.get(), self.parent.icon_y.get()),
+                (self.parent.date_x.get(), self.parent.date_y.get()),
+                self.parent.custom_text.get(),
+                (self.parent.custom_text_x.get(), self.parent.custom_text_y.get()),
+                self.parent.custom_text_font_size.get(),
+                (self.parent.custom_text_max_w.get(), self.parent.custom_text_max_h.get()),
+                self.parent.custom_text_colors
             )
-            self.preview_img = img.resize((540, 640), Image.LANCZOS)
-            self.tk_preview_img = ImageTk.PhotoImage(self.preview_img)
+
+            # Get actual canvas dimensions, or use defaults if not yet rendered
+            canvas_w = self.canvas.winfo_width() if self.canvas.winfo_width() > 1 else 540
+            canvas_h = self.canvas.winfo_height() if self.canvas.winfo_height() > 1 else 640
+
+            # Resize the PIL image to fit the canvas while maintaining aspect ratio
+            img_pil.thumbnail((canvas_w, canvas_h), Image.LANCZOS)
+            self.tk_preview_img = ImageTk.PhotoImage(img_pil) # Keep reference!
+
             self.canvas.delete("all")
-            self.canvas.create_image(0,0,anchor="nw", image=self.tk_preview_img)
+            self.canvas.create_image(canvas_w / 2, canvas_h / 2, image=self.tk_preview_img)
+            # Update scrollregion if needed (though thumbnail makes it fit)
+            self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+
+            if os.path.exists(temp_output_path):
+                os.remove(temp_output_path)
+
         except Exception as e:
             self.canvas.delete("all")
-            self.canvas.create_text(270, 320, text=f"Preview Error:\n{e}", fill="red", font=("Arial", 14))
-            print(f"Preview Error: {e}")
+            self.canvas.create_text(self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2,
+                                    text=f"Preview Error:\n{e}", fill="red", font=("Arial", 12))
+            print(f"Error updating preview: {e}")
 
     def finalize(self):
         filename = datetime.datetime.now().strftime("TCBPhotocard_%Y%m%d_%H%M%S.png")
@@ -530,84 +777,108 @@ class Step3Frame(tk.Frame):
                 self.parent.bg_image_path,
                 TEMPLATE_IMAGE,
                 FONT_PATH,
-                output_path=out_path,
-                title_pos=(self.parent.title_x.get(), self.parent.title_y.get()),
-                title_font_size=self.parent.title_font_size.get(),
-                title_box=(self.parent.title_max_w.get(), self.parent.title_max_h.get()),
-                title_line_spacing=self.parent.title_line_spacing.get(),
-                title_colors=self.parent.title_colors,
-                icon_pos=(self.parent.icon_x.get(), self.parent.icon_y.get()),
-                date_pos=(self.parent.date_x.get(), self.parent.date_y.get()),
-                custom_text_content=self.parent.custom_text.get(),
-                custom_text_pos=(self.parent.custom_text_x.get(), self.parent.custom_text_y.get()), # NEW parameter
-                custom_text_font_size=self.parent.custom_text_font_size.get(),
-                custom_text_box=(self.parent.custom_text_max_w.get(), self.parent.custom_text_max_h.get()), # NEW parameter
-                custom_text_colors=self.parent.custom_text_colors
+                out_path,
+                (self.parent.title_x.get(), self.parent.title_y.get()),
+                self.parent.title_font_size.get(),
+                (self.parent.title_max_w.get(), self.parent.title_max_h.get()),
+                self.parent.title_line_spacing.get(),
+                self.parent.title_colors,
+                (self.parent.icon_x.get(), self.parent.icon_y.get()),
+                (self.parent.date_x.get(), self.parent.date_y.get()),
+                self.parent.custom_text.get(),
+                (self.parent.custom_text_x.get(), self.parent.custom_text_y.get()),
+                self.parent.custom_text_font_size.get(),
+                (self.parent.custom_text_max_w.get(), self.parent.custom_text_max_h.get()),
+                self.parent.custom_text_colors
             )
             self.parent.final_image_path = out_path
+            # Pass the PIL image directly to Step4Frame
+            final_img_pil = Image.open(out_path) # Reload the generated image for display
+            self.parent.frames[Step4Frame].set_image(final_img_pil)
             self.parent.show_frame(Step4Frame)
-            self.parent.frames[Step4Frame].load_content()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save final photocard: {e}")
             print(f"Finalize Error: {e}")
 
-class Step4Frame(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
+# === Step 4 ===
+class Step4Frame(ttk.Frame): # Changed to ttk.Frame
+    def __init__(self, master_frame, parent_app):
+        super().__init__(master_frame) # master_frame is now the container
+        self.parent = parent_app
+        self.img_tk = None # To hold the PhotoImage reference
 
-        tk.Label(self, text="Photocard saved successfully!", font=("Arial", 16)).pack(pady=10)
+        label = ttk.Label(self, text="Photocard Generated!")
+        label.pack(pady=20)
 
-        self.path_label = tk.Label(self, text="", fg="blue", cursor="hand2")
-        self.path_label.pack()
-        self.path_label.bind("<Button-1>", self.open_directory)
+        self.image_canvas = tk.Canvas(self, width=400, height=600, bg="#2E2E2E") # Explicit dark background
+        self.image_canvas.pack(pady=10, expand=True)
 
-        tk.Label(self, text="Summary:").pack(pady=(10, 0))
-        self.summary_box = ScrolledText(self, height=8, width=100)
-        self.summary_box.pack(padx=10)
+        self.path_label = ttk.Label(self, text="", cursor="hand2") # Changed to ttk.Label
+        self.path_label.pack(pady=5)
+        self.path_label.bind("<Button-1>", self.open_image_location)
 
-        copy_sum_btn = tk.Button(self, text="Copy Summary", command=self.copy_summary)
-        copy_sum_btn.pack(pady=5)
+        self.open_button = ttk.Button(self, text="Open Image Location", command=self.open_image_location)
+        self.open_button.pack(pady=5)
 
-        tk.Label(self, text="Full Article:").pack(pady=(10, 0))
-        self.full_box = ScrolledText(self, height=12, width=100)
-        self.full_box.pack(padx=10)
+        self.share_button = ttk.Button(self, text="Share (Coming Soon)", state=tk.DISABLED)
+        self.share_button.pack(pady=5)
 
-        copy_full_btn = tk.Button(self, text="Copy Full Article", command=self.copy_full)
-        copy_full_btn.pack(pady=5)
+        back_button = ttk.Button(self, text="Generate New", command=self.reset_app)
+        back_button.pack(pady=20)
 
-        self.again_btn = tk.Button(self, text="Make Another One", command=self.reset)
-        self.again_btn.pack(pady=15)
+    def set_image(self, pil_image):
+        # Get current canvas dimensions for dynamic resizing
+        canvas_width = self.image_canvas.winfo_width()
+        canvas_height = self.image_canvas.winfo_height()
 
-    def open_directory(self, event=None):
-        path = os.path.dirname(self.parent.final_image_path)
-        if os.path.exists(path):
-            webbrowser.open(path)
+        # Provide fallback dimensions if canvas not yet rendered
+        if canvas_width <= 1 or canvas_height <= 1:
+            canvas_width = 400
+            canvas_height = 600
 
-    def load_content(self):
-        self.path_label.config(text=self.parent.final_image_path)
-        self.summary_box.delete("1.0", tk.END)
-        self.summary_box.insert(tk.END, self.parent.summary_text)
-        self.full_box.delete("1.0", tk.END)
-        self.full_box.insert(tk.END, self.parent.full_text)
+        img_width, img_height = pil_image.size
+        # Calculate ratio to fit image within canvas
+        ratio = min(canvas_width / img_width, canvas_height / img_height)
+        new_width = int(img_width * ratio)
+        new_height = int(img_height * ratio)
 
-    def copy_summary(self):
-        self.parent.clipboard_clear()
-        self.parent.clipboard_append(self.summary_box.get("1.0", "end-1c"))
-        messagebox.showinfo("Copied", "Summary copied to clipboard.")
+        resized_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
+        self.img_tk = ImageTk.PhotoImage(resized_image) # Keep reference!
 
-    def copy_full(self):
-        self.parent.clipboard_clear()
-        self.parent.clipboard_append(self.full_box.get("1.0", "end-1c"))
-        messagebox.showinfo("Copied", "Full article copied to clipboard.")
+        self.image_canvas.delete("all")
+        self.image_canvas.create_image(canvas_width / 2, canvas_height / 2, image=self.img_tk)
+        
+        if self.parent.final_image_path:
+            self.path_label.config(text=f"Saved to: {self.parent.final_image_path}")
 
-    def reset(self):
+    def open_image_location(self, event=None):
+        if self.parent.final_image_path and os.path.exists(self.parent.final_image_path):
+            try:
+                folder_path = os.path.dirname(self.parent.final_image_path)
+                if sys.platform == "win32":
+                    os.startfile(folder_path)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", folder_path])
+                else: # Linux and other POSIX systems
+                    subprocess.Popen(["xdg-open", folder_path])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open image location: {e}")
+        else:
+            messagebox.showinfo("Info", "No image has been saved yet.")
+
+    def reset_app(self):
+        # Reset all relevant parent app variables
         self.parent.news_url.set("")
         self.parent.bg_image_path = None
         self.parent.final_image_path = None
+        self.parent.title_text = "" # Clear title text
+        self.parent.summary_text = "" # Clear summary text
+        self.parent.full_text = "" # Clear full text
         self.parent.title_colors = [(0, 10000, (255,255,255,255))]
-        self.parent.custom_text.set("Add your custom message here!") # Reset custom text
-        self.parent.custom_text_colors = [(0, 10000, (255,255,255,255))] # Reset custom text colors
+        self.parent.custom_text.set("Add source and relocate")
+        self.parent.custom_text_colors = [(0, 10000, (255,255,255,255))]
+        
+        # Show the first frame and ensure its state is reset
         self.parent.show_frame(Step1Frame)
         self.parent.frames[Step1Frame].bg_label.config(text="No image selected")
         self.parent.frames[Step1Frame].check_ready()
