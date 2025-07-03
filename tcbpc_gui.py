@@ -51,8 +51,6 @@ def summarize_article(text):
     return summary.strip()
 
 def draw_multicolor_text(draw, position, text, font, colors, max_width, max_height):
-    # text: string
-    # colors: list of (start_idx, end_idx, (r,g,b,a))
     words = text.split()
     lines = []
     line = ''
@@ -97,13 +95,11 @@ def draw_multicolor_text(draw, position, text, font, colors, max_width, max_heig
 def generate_photocard(title, bg_path, template_path, font_path, output_path,
                        title_pos, title_font_size, title_box,
                        icon_pos, date_pos, colors):
-    # Load background, resize to 1080 width maintaining aspect ratio
     bg = Image.open(bg_path).convert("RGBA")
     w_percent = 1080 / float(bg.size[0])
     h_size = int((float(bg.size[1]) * float(w_percent)))
     bg = bg.resize((1080, h_size), Image.LANCZOS)
 
-    # Load template overlay
     overlay = Image.open(template_path).convert("RGBA")
 
     canvas_height = max(bg.size[1], overlay.size[1])
@@ -113,23 +109,17 @@ def generate_photocard(title, bg_path, template_path, font_path, output_path,
 
     draw = ImageDraw.Draw(canvas)
 
-    # Draw TCB icon
     if os.path.exists(TCB_ICON):
         icon = Image.open(TCB_ICON).convert("RGBA")
         canvas.paste(icon, icon_pos, icon)
 
-    # Draw date text
     date_font = ImageFont.truetype(font_path, 24)
     date_str = datetime.datetime.now().strftime("%d %B, %Y").upper()
-    bbox = draw.textbbox((0,0), date_str, font=date_font)
-    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text(date_pos, date_str, font=date_font, fill=(255,255,255,255))
 
-    # Draw multi-colored title text in box area
     font_title = ImageFont.truetype(font_path, title_font_size)
     draw_multicolor_text(draw, title_pos, title, font_title, colors, title_box[0], title_box[1])
 
-    # Crop to 1080x1280 final size
     final_img = canvas.crop((0, 0, 1080, 1280))
     final_img.save(output_path)
     return output_path, final_img
@@ -156,9 +146,9 @@ class TCBWizardApp(tk.Tk):
         super().__init__()
         self.title("TCB News Photocard Generator")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.state('zoomed')
 
-        # Data vars
         self.news_url = tk.StringVar()
         self.bg_image_path = None
 
@@ -178,11 +168,10 @@ class TCBWizardApp(tk.Tk):
         self.date_x = tk.IntVar(value=800)
         self.date_y = tk.IntVar(value=1240)
 
-        self.title_colors = [(0, 10000, (255,255,255,255))]  # default all white
+        self.title_colors = [(0, 10000, (255,255,255,255))]
 
         self.final_image_path = None
 
-        # Frames
         self.frames = {}
         for FrameClass in (Step1Frame, Step2Frame, Step3Frame, Step4Frame):
             frame = FrameClass(self)
@@ -236,7 +225,10 @@ class Step1Frame(tk.Frame):
         self.gen_btn.pack(pady=15)
 
         def check_ready(*args):
-            self.gen_btn.config(state="normal" if (parent.news_url.get() and parent.bg_image_path) else "disabled")
+            if parent.news_url.get() and parent.bg_image_path:
+                self.gen_btn.config(state="normal")
+            else:
+                self.gen_btn.config(state="disabled")
 
         parent.news_url.trace_add('write', check_ready)
         self.check_ready = check_ready
@@ -298,15 +290,12 @@ class Step3Frame(tk.Frame):
         super().__init__(parent)
         self.parent = parent
 
-        # Left preview canvas
         self.canvas = tk.Canvas(self, width=540, height=640, bg="black")
         self.canvas.pack(side="left", padx=10, pady=10)
 
-        # Right controls
         control_frame = tk.Frame(self)
         control_frame.pack(side="right", fill="y", padx=10, pady=10)
 
-        # Title sliders
         tk.Label(control_frame, text="Title X:").pack()
         tk.Scale(control_frame, from_=0, to=1080, orient="horizontal", variable=parent.title_x, command=lambda e:self.update_preview()).pack(fill="x")
         tk.Label(control_frame, text="Title Y:").pack()
@@ -321,19 +310,16 @@ class Step3Frame(tk.Frame):
         tk.Label(control_frame, text="Title Max Height:").pack()
         tk.Scale(control_frame, from_=50, to=600, orient="horizontal", variable=parent.title_max_h, command=lambda e:self.update_preview()).pack(fill="x")
 
-        # Icon sliders
         tk.Label(control_frame, text="TCB Icon X:").pack(pady=(20,0))
         tk.Scale(control_frame, from_=0, to=1080, orient="horizontal", variable=parent.icon_x, command=lambda e:self.update_preview()).pack(fill="x")
         tk.Label(control_frame, text="TCB Icon Y:").pack()
         tk.Scale(control_frame, from_=0, to=1280, orient="horizontal", variable=parent.icon_y, command=lambda e:self.update_preview()).pack(fill="x")
 
-        # Date sliders
         tk.Label(control_frame, text="Date X:").pack(pady=(20,0))
         tk.Scale(control_frame, from_=0, to=1080, orient="horizontal", variable=parent.date_x, command=lambda e:self.update_preview()).pack(fill="x")
         tk.Label(control_frame, text="Date Y:").pack()
         tk.Scale(control_frame, from_=0, to=1280, orient="horizontal", variable=parent.date_y, command=lambda e:self.update_preview()).pack(fill="x")
 
-        # Title Text widget for partial color editing
         tk.Label(control_frame, text="Edit Title Text (select portion and pick color):").pack(pady=(10,0))
         self.title_text_widget = tk.Text(control_frame, height=6, width=40, wrap="word", font=("TiroBangla", 16))
         self.title_text_widget.pack()
@@ -341,7 +327,7 @@ class Step3Frame(tk.Frame):
         color_btn = tk.Button(control_frame, text="Pick Color for Selection", command=self.pick_color_for_selection)
         color_btn.pack(pady=5)
 
-        self.finalize_btn = tk.Button(self, text="Finalize & Prepare Articles", font=("Arial", 14), command=self.finalize)
+        self.finalize_btn = tk.Button(self, text="Finalize & Prepare summarized and full article", font=("Arial", 14), command=self.finalize)
         self.finalize_btn.pack(pady=5)
 
         self.title_text_widget.bind("<<Modified>>", self.on_text_change)
@@ -357,7 +343,6 @@ class Step3Frame(tk.Frame):
     def load_preview(self):
         self.title_text_widget.delete("1.0", tk.END)
         self.title_text_widget.insert(tk.END, self.parent.title_text)
-        self.clear_tags()
         self.apply_colors_to_text_widget()
         self.update_preview()
 
@@ -429,13 +414,14 @@ class Step3Frame(tk.Frame):
             self.canvas.create_image(0,0,anchor="nw", image=self.tk_preview_img)
         except Exception as e:
             self.canvas.delete("all")
-            self.canvas.create_text(270, 320, text=f"Preview Error:\n{e}", fill="red", font=("Arial", 14), justify="center")
+            self.canvas.create_text(270, 320, text=f"Preview Error:\n{e}", fill="red", font=("Arial", 14))
 
     def finalize(self):
-        # Save final image and move to step 4
+        # Save final photocard
+        filename = datetime.datetime.now().strftime("TCBPhotocard_%Y%m%d_%H%M%S.png")
+        out_path = os.path.join(OUTPUT_DIR, filename)
+
         try:
-            filename = self.parent.title_text[:50].replace(" ", "_").replace("/", "-") + ".png"
-            out_path = os.path.join(OUTPUT_DIR, filename)
             generate_photocard(
                 self.parent.title_text,
                 self.parent.bg_image_path,
@@ -451,7 +437,7 @@ class Step3Frame(tk.Frame):
             )
             self.parent.final_image_path = out_path
             self.parent.show_frame(Step4Frame)
-            self.parent.frames[Step4Frame].load_data()
+            self.parent.frames[Step4Frame].load_content()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save final photocard: {e}")
 
@@ -461,75 +447,61 @@ class Step4Frame(tk.Frame):
         super().__init__(parent)
         self.parent = parent
 
-        tk.Label(self, text="Photocard Created!", font=("Arial", 18)).pack(pady=10)
+        tk.Label(self, text="Photocard saved successfully!", font=("Arial", 16)).pack(pady=10)
 
         self.path_label = tk.Label(self, text="", fg="blue", cursor="hand2")
         self.path_label.pack()
-        self.path_label.bind("<Button-1>", self.open_folder)
+        self.path_label.bind("<Button-1>", self.open_directory)
 
-        tk.Label(self, text="📝 Summary").pack(pady=(15,0))
-        self.summary_box = ScrolledText(self, height=6, width=90)
+        tk.Label(self, text="Summary:").pack(pady=(10, 0))
+        self.summary_box = ScrolledText(self, height=8, width=100)
         self.summary_box.pack(padx=10)
 
-        self.copy_summary_btn = tk.Button(self, text="Copy Summary", command=self.copy_summary)
-        self.copy_summary_btn.pack(pady=5)
+        copy_sum_btn = tk.Button(self, text="Copy Summary", command=self.copy_summary)
+        copy_sum_btn.pack(pady=5)
 
-        tk.Label(self, text="📄 Full Article + Source").pack(pady=(10,0))
-        self.full_box = ScrolledText(self, height=10, width=90)
+        tk.Label(self, text="Full Article:").pack(pady=(10, 0))
+        self.full_box = ScrolledText(self, height=12, width=100)
         self.full_box.pack(padx=10)
 
-        self.copy_full_btn = tk.Button(self, text="Copy Full Article", command=self.copy_full)
-        self.copy_full_btn.pack(pady=5)
+        copy_full_btn = tk.Button(self, text="Copy Full Article", command=self.copy_full)
+        copy_full_btn.pack(pady=5)
 
-        self.another_btn = tk.Button(self, text="Make Another Photocard ", command=self.make_another)
-        self.another_btn.pack(pady=20)
+        self.again_btn = tk.Button(self, text="Make Another One", command=self.reset)
+        self.again_btn.pack(pady=15)
 
-    def load_data(self):
-        self.path_label.config(text=f"Saved to: {self.parent.final_image_path}")
+    def open_directory(self, event=None):
+        path = os.path.dirname(self.parent.final_image_path)
+        if os.path.exists(path):
+            webbrowser.open(path)
 
+    def load_content(self):
+        self.path_label.config(text=self.parent.final_image_path)
         self.summary_box.delete("1.0", tk.END)
         self.summary_box.insert(tk.END, self.parent.summary_text)
-
         self.full_box.delete("1.0", tk.END)
-        self.full_box.insert(tk.END, self.parent.full_text + f"\n\nSource: {self.parent.news_url.get()}")
-
-    def open_folder(self, event=None):
-        folder = os.path.dirname(self.parent.final_image_path)
-        webbrowser.open(folder)
+        self.full_box.insert(tk.END, self.parent.full_text)
 
     def copy_summary(self):
         self.parent.clipboard_clear()
-        self.parent.clipboard_append(self.summary_box.get("1.0", tk.END))
+        self.parent.clipboard_append(self.summary_box.get("1.0", "end-1c"))
+        messagebox.showinfo("Copied", "Summary copied to clipboard.")
 
     def copy_full(self):
         self.parent.clipboard_clear()
-        self.parent.clipboard_append(self.full_box.get("1.0", tk.END))
+        self.parent.clipboard_append(self.full_box.get("1.0", "end-1c"))
+        messagebox.showinfo("Copied", "Full article copied to clipboard.")
 
-    def make_another(self):
-        # Reset all data and go back to step 1
+    def reset(self):
         self.parent.news_url.set("")
         self.parent.bg_image_path = None
-        self.parent.title_text = ""
-        self.parent.summary_text = ""
-        self.parent.full_text = ""
-
-        self.parent.title_x.set(150)
-        self.parent.title_y.set(880)
-        self.parent.title_font_size.set(36)
-        self.parent.title_max_w.set(700)
-        self.parent.title_max_h.set(200)
-
-        self.parent.icon_x.set(800)
-        self.parent.icon_y.set(20)
-        self.parent.date_x.set(800)
-        self.parent.date_y.set(1240)
-
+        self.parent.final_image_path = None
         self.parent.title_colors = [(0, 10000, (255,255,255,255))]
-
         self.parent.show_frame(Step1Frame)
         self.parent.frames[Step1Frame].bg_label.config(text="No image selected")
-        self.parent.frames[Step1Frame].gen_btn.config(state="disabled")
+        self.parent.frames[Step1Frame].check_ready()
 
+# === Run App ===
 if __name__ == "__main__":
     app = TCBWizardApp()
     app.mainloop()
