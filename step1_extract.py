@@ -29,7 +29,7 @@ print(f"User selected language: {user_lang}")
 if detected_lang != 'unknown':
     if (user_lang == 'bn' and detected_lang != 'bn') or (user_lang == 'en' and detected_lang != 'en'):
         print("\n⚠️ Warning: The detected language of the article does NOT match your selection.")
-        print("Please double-check the URL or language choice.\n")
+        print("Please double-check the URL or language choice...\n")
 
 print("\n📰 Title:")
 print(article.title)
