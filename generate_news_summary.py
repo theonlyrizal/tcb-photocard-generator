@@ -44,7 +44,7 @@ def split_text_tokenwise(text):
 
 def summarize_text(title, text):
     chunks = split_text_tokenwise(text)
-    print(f"🔍 Total chunks: {len(chunks)}")
+    print(f"🔍 Total chunk(s): {len(chunks)}")
 
     summaries = []
     for i, chunk in enumerate(chunks):
