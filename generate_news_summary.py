@@ -71,7 +71,7 @@ def main():
         if lang == "bn":
             print("⚠️ Bangla summarization not supported. Translate first.")
 
-        print("\nSummarizing article...")
+        print("\nSummarizing article(s)...")
         title, subtitle = summarize_text(title, full_text)
 
         print("\n=== Final Photocard Content ===")
