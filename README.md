@@ -12,7 +12,7 @@ A graphical user interface (GUI) tool that automates the creation of custom phot
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository_url>
+git clone https://github.com/theonlyrizal/tcb-photocard-generator.git
 cd tcb-photocard-generator
 ```
 
@@ -32,7 +32,7 @@ source venv/bin/activate
 ### 3. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install newspaper3k transformers Pillow nltk
 ```
 
 Contents of `requirements.txt`:
