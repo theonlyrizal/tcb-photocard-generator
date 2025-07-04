@@ -32,7 +32,7 @@ source venv/bin/activate
 ### 3. Install Dependencies
 
 ```bash
-pip install newspaper3k transformers Pillow nltk
+pip install newspaper3k transformers pillow nltk
 ```
 
 Contents of `requirements.txt`:
